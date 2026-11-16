@@ -1,3 +1,47 @@
+# mini-vLLM
+
+Fork of [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) @ `bb823b3` with a mixed-batch scheduler, an OpenAI-compatible streaming server, CPU tests and an ablation benchmark.
+
+## Changes vs upstream
+
+| | upstream | mini-vLLM |
+|---|---|---|
+| one step | all-prefill **or** all-decode | decode tokens **and** prefill chunks together |
+| chunked prefill | only the head of the waiting queue | any number of waiting requests, each chunkable |
+| prefill/decode state | `is_prefill` flag set by the scheduler | derived from `num_cached_tokens` vs `num_tokens` (`Sequence.is_prefill`) |
+| serving | offline `generate()` | `server.py`: `/v1/chat/completions`, `/v1/completions`, SSE streaming |
+
+Scheduling (`nanovllm/engine/scheduler.py`, `enable_mixed_batch=True`):
+1. Every running request gets 1 decode token (preempt from the tail if out of KV blocks).
+2. Leftover `max_num_batched_tokens` budget is filled FCFS with prefill chunks.
+3. A step with any prefill chunk runs the varlen FlashAttention path (a decode is a `q_len=1` chunk over the paged cache); a pure-decode step keeps the CUDA-graph path.
+
+`enable_mixed_batch=False` restores the upstream policy for A/B comparison.
+
+## Run
+
+```bash
+pip install -e . fastapi uvicorn
+python server.py --model ~/huggingface/Qwen3-0.6B
+python bench/ablation.py --model ~/huggingface/Qwen3-0.6B     # mixed/legacy x shared/unique prefix
+```
+
+CPU tests (no GPU, no torch):
+
+```bash
+pip install xxhash numpy pytest fastapi httpx uvicorn
+pytest tests
+```
+
+## Status
+
+- CPU: scheduler / KV-block invariants, chunking, prefix reuse, preemption, randomized workloads, server streaming — 13 tests pass.
+- GPU end-to-end correctness and benchmark numbers: **not run yet**. Results go to `bench/results.jsonl`.
+
+---
+
+*Upstream README below.*
+
 <p align="center">
 <img width="300" src="assets/logo.png">
 </p>

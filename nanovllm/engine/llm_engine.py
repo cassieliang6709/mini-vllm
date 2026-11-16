@@ -40,19 +40,27 @@ class LLMEngine:
         for p in self.ps:
             p.join()
 
-    def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
+    def add_request(self, prompt: str | list[int], sampling_params: SamplingParams) -> Sequence:
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
         seq = Sequence(prompt, sampling_params)
+        seq.arrival_time = perf_counter()
+        seq.token_times = []    # wall time of every emitted token -> TTFT / ITL
         self.scheduler.add(seq)
+        return seq
 
     def step(self):
-        seqs, is_prefill = self.scheduler.schedule()
-        num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
-        token_ids = self.model_runner.call("run", seqs, is_prefill)
-        self.scheduler.postprocess(seqs, token_ids, is_prefill)
+        seqs, is_pure_decode = self.scheduler.schedule()
+        num_prefill_tokens = sum(seq.num_scheduled_tokens for seq in seqs if seq.is_prefill)
+        num_decode_tokens = len(seqs) - sum(1 for seq in seqs if seq.is_prefill)
+        token_ids = self.model_runner.call("run", seqs, is_pure_decode)
+        emitted = self.scheduler.postprocess(seqs, token_ids)
+        now = perf_counter()
+        for seq, _ in emitted:
+            seq.token_times.append(now)
+        self.last_emitted = emitted
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
-        return outputs, num_tokens
+        return outputs, (num_prefill_tokens, num_decode_tokens)
 
     def is_finished(self):
         return self.scheduler.is_finished()
@@ -72,11 +80,13 @@ class LLMEngine:
         prefill_throughput = decode_throughput = 0.
         while not self.is_finished():
             t = perf_counter()
-            output, num_tokens = self.step()
-            if num_tokens > 0:
-                prefill_throughput = num_tokens / (perf_counter() - t)
-            else:
-                decode_throughput = -num_tokens / (perf_counter() - t)
+            output, (num_prefill, num_decode) = self.step()
+            dt = perf_counter() - t
+            # mixed steps contribute to both counters
+            if num_prefill:
+                prefill_throughput = num_prefill / dt
+            if num_decode:
+                decode_throughput = num_decode / dt
             pbar.set_postfix({
                 "Prefill": f"{int(prefill_throughput)}tok/s",
                 "Decode": f"{int(decode_throughput)}tok/s",

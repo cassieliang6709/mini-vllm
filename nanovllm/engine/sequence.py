@@ -24,7 +24,6 @@ class Sequence:
         self.num_prompt_tokens = len(token_ids)
         self.num_cached_tokens = 0
         self.num_scheduled_tokens = 0
-        self.is_prefill = True
         self.block_table = []
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens
@@ -39,6 +38,16 @@ class Sequence:
     @property
     def is_finished(self):
         return self.status == SequenceStatus.FINISHED
+
+    @property
+    def num_uncomputed_tokens(self):
+        # tokens whose KV is not in cache yet; prefill and decode differ only in this count
+        return self.num_tokens - self.num_cached_tokens
+
+    @property
+    def is_prefill(self):
+        # decode = only the newly sampled token is uncomputed
+        return self.num_uncomputed_tokens > 1 or self.num_completion_tokens == 0
 
     @property
     def num_completion_tokens(self):
@@ -70,7 +79,7 @@ class Sequence:
         self.num_tokens += 1
 
     def __getstate__(self):
-        last_state = self.last_token if not self.is_prefill else self.token_ids
+        last_state = self.token_ids if self.is_prefill else self.last_token
         return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state)
 
     def __setstate__(self, state):

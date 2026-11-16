@@ -97,7 +97,7 @@ class ModelRunner:
         seqs = [Sequence([0] * seq_len) for _ in range(num_seqs)]
         for seq in seqs:
             seq.num_scheduled_tokens = seq_len
-        self.run(seqs, True)
+        self.run(seqs, False)
         torch.cuda.empty_cache()
 
     def allocate_kv_cache(self):
@@ -127,6 +127,8 @@ class ModelRunner:
         return block_tables
 
     def prepare_prefill(self, seqs: list[Sequence]):
+        # varlen path: serves pure prefill and mixed (prefill chunks + decode tokens) batches.
+        # a decode seq is just a q_len=1 chunk whose K/V comes from the paged cache.
         input_ids = []
         positions = []
         cu_seqlens_q = [0]
@@ -140,7 +142,10 @@ class ModelRunner:
             seqlen_q = seq.num_scheduled_tokens
             end = start + seqlen_q
             seqlen_k = end
-            input_ids.extend(seq[start:end])
+            if seq.is_prefill:
+                input_ids.extend(seq[start:end])
+            else:    # decode token inside a mixed batch; TP workers only receive last_token
+                input_ids.append(seq.last_token)
             positions.extend(range(start, end))
             cu_seqlens_q.append(cu_seqlens_q[-1] + seqlen_q)
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
@@ -211,7 +216,9 @@ class ModelRunner:
             graph.replay()
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
-    def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
+    def run(self, seqs: list[Sequence], is_pure_decode: bool) -> list[int]:
+        # pure decode keeps the CUDA-graph path; anything containing a prefill chunk goes varlen
+        is_prefill = not is_pure_decode
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         logits = self.run_model(input_ids, positions, is_prefill)

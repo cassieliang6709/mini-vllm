@@ -16,6 +16,7 @@ class Config:
     eos: int = -1
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
+    enable_mixed_batch: bool = True    # False = upstream policy (prefill-only or decode-only steps)
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
