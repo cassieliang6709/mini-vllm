@@ -127,37 +127,43 @@ def expected_distinct_experts(E, k, tokens):
     return E * (1 - (1 - k / E) ** tokens)
 
 
-def decode_bytes(m: ModelShape, context_lens, replicated_dense_copies=1):
+def decode_bytes(m: ModelShape, context_lens, replicated_dense_copies=1, ep_size=1):
+    """Bytes read in one decode step. ep_size > 1 gives the PER-GPU view under expert parallelism with
+    data-parallel attention: this GPU reads all dense weights plus its 1/ep share of the experts that
+    the whole group's ep*B tokens hit (assumes balanced load); KV is this rank's own sequences."""
     B = len(context_lens)
     dense = m.layers * m.dense_params_per_layer * replicated_dense_copies + m.lm_head_params
-    experts = m.layers * expected_distinct_experts(m.num_experts, m.top_k, B) * m.expert_params
+    experts = m.layers * expected_distinct_experts(m.num_experts, m.top_k, B * ep_size) / ep_size * m.expert_params
     weight_bytes = (dense + experts) * m.dtype_bytes
     kv_per_token = 2 * m.layers * m.n_kv_heads * m.head_dim * m.dtype_bytes
     return weight_bytes + sum(context_lens) * kv_per_token
 
 
-def mbu(m: ModelShape, context_lens, step_time_s, peak_bw, num_gpus=1, replicated_dense_copies=1):
-    return decode_bytes(m, context_lens, replicated_dense_copies) / step_time_s / (peak_bw * num_gpus)
+def mbu(m: ModelShape, context_lens, step_time_s, peak_bw, num_gpus=1, replicated_dense_copies=1, ep_size=1):
+    return decode_bytes(m, context_lens, replicated_dense_copies, ep_size) / step_time_s / (peak_bw * num_gpus)
 
 
 class StepMetrics:
     """Accumulates per-step MFU (prefill-only steps) and MBU (pure-decode steps).
     Mixed steps are excluded from both: neither formula describes them cleanly."""
 
-    def __init__(self, shape: ModelShape, gpu_name: str, num_gpus=1, replicated_dense_copies=1):
-        self.m, self.n, self.rep = shape, num_gpus, replicated_dense_copies
+    def __init__(self, shape: ModelShape, gpu_name: str, num_gpus=1, replicated_dense_copies=1, ep_size=1):
+        # EP: instantiate one per rank with num_gpus=1, ep_size=world (per-GPU view); TP: num_gpus=tp
+        self.m, self.n, self.rep, self.ep = shape, num_gpus, replicated_dense_copies, ep_size
         self.peak = peak_for(gpu_name)
         self.prefill_flops = self.prefill_time = 0.0
         self.decode_bytes = self.decode_time = 0.0
 
     def record(self, seqs_info, dt):
         """seqs_info: list of (cached_tokens_before, scheduled_tokens, is_prefill)."""
+        if not seqs_info:    # idle-rank dummy step (EP)
+            return
         pre = [x for x in seqs_info if x[2]]
         if pre and len(pre) == len(seqs_info):
             self.prefill_flops += prefill_flops(self.m, [(c, q) for c, q, _ in pre])
             self.prefill_time += dt
         elif not pre:
-            self.decode_bytes += decode_bytes(self.m, [c + q for c, q, _ in seqs_info], self.rep)
+            self.decode_bytes += decode_bytes(self.m, [c + q for c, q, _ in seqs_info], self.rep, self.ep)
             self.decode_time += dt
 
     def summary(self):

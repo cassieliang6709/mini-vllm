@@ -204,6 +204,7 @@ class ExpertParallelMoE(nn.Module):
         self.act_fn = SiluAndMul()
         self.collect_stats = False
         self.last_stats: dict | None = None
+        self.cum_counts: torch.Tensor | None = None    # tokens per expert since stats were switched on
 
     # ---- weight loading (called from the model's load_weight hook) ----
     def load_expert(self, expert_id: int, kind: str, tensor: torch.Tensor):
@@ -268,6 +269,8 @@ class ExpertParallelMoE(nn.Module):
         topk_w, topk_ids = route(x, self.gate_weight, self.top_k, self.norm_topk_prob)
         if self.collect_stats:
             self.last_stats = load_balance_stats(topk_ids, self.num_experts, self.ep_size, self.ep_rank)
+            c = torch.bincount(topk_ids.flatten(), minlength=self.num_experts)
+            self.cum_counts = c if self.cum_counts is None else self.cum_counts + c
         if self.ep_size == 1:
             T, k = topk_ids.shape
             y = self._local_experts(x.repeat_interleave(k, 0), topk_ids.reshape(-1))

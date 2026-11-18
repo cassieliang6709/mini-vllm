@@ -33,3 +33,20 @@ def test_moe_expected_experts():
 def test_unknown_gpu_gives_none():
     assert M.peak_for("Some GPU") is None
     assert M.peak_for("NVIDIA GeForce RTX 4090") == (165.2e12, 1008e9)
+
+
+def test_ep_per_gpu_view_reads_fewer_expert_bytes():
+    m = M.ModelShape(layers=16, hidden=2048, n_heads=16, n_kv_heads=16, head_dim=128, vocab=50304,
+                     num_experts=64, top_k=8, expert_ffn=1024)
+    single = M.decode_bytes(m, [100] * 32)
+    ep2 = M.decode_bytes(m, [100] * 32, ep_size=2)
+    assert ep2 < single
+    # OLMoE-1B-7B total params ~6.9B
+    assert 6.5 < m.total_params() / 1e9 < 7.3
+
+
+def test_budget_sweep_builds_one_command_per_budget():
+    import budget_sweep
+    cmds = budget_sweep.build_commands("/m", [512, 2048, 8192], "mixed,shared", 2, "o.jsonl", ["--seed", "1"])
+    assert [c[c.index("--max-num-batched-tokens") + 1] for c in cmds] == ["512", "2048", "8192"]
+    assert all("--tp" in c and "o.jsonl" in c and c[-2:] == ["--seed", "1"] for c in cmds)

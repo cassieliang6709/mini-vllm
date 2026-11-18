@@ -6,10 +6,11 @@ from multiprocessing.shared_memory import SharedMemory
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
-from nanovllm.models.qwen3 import Qwen3ForCausalLM
+from nanovllm.models import get_model_class
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
+from nanovllm.utils.parallel import set_parallel_mode
 
 
 class ModelRunner:
@@ -19,16 +20,23 @@ class ModelRunner:
         hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
         self.enforce_eager = config.enforce_eager
-        self.world_size = config.tensor_parallel_size
+        self.ep_mode = config.expert_parallel_size > 1
+        self.world_size = config.expert_parallel_size if self.ep_mode else config.tensor_parallel_size
+        self.tp_size = 1 if self.ep_mode else self.world_size    # dense layers are replicated under EP
         self.rank = rank
         self.event = event
+        # TP: rank 0 schedules and samples, workers replay its calls (shared memory).
+        # EP: every rank has its own scheduler/requests (EPEngine), so every rank samples and no shm loop.
+        self.use_shm = self.world_size > 1 and not self.ep_mode
+        self.is_driver = rank == 0 or self.ep_mode
 
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.dtype)
         torch.set_default_device("cuda")
-        self.model = Qwen3ForCausalLM(hf_config)
+        set_parallel_mode("ep" if self.ep_mode else "tp")
+        self.model = get_model_class(hf_config)(hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()
         self.warmup_model()
@@ -38,7 +46,7 @@ class ModelRunner:
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
 
-        if self.world_size > 1:
+        if self.use_shm:
             if rank == 0:
                 self.shm = SharedMemory(name="nanovllm", create=True, size=2**20)
                 dist.barrier()
@@ -48,7 +56,7 @@ class ModelRunner:
                 self.loop()
 
     def exit(self):
-        if self.world_size > 1:
+        if self.use_shm:
             self.shm.close()
             dist.barrier()
             if self.rank == 0:
@@ -83,7 +91,7 @@ class ModelRunner:
             event.set()
 
     def call(self, method_name, *args):
-        if self.world_size > 1 and self.rank == 0:
+        if self.use_shm and self.rank == 0:
             self.write_shm(method_name, *args)
         method = getattr(self, method_name, None)
         return method(*args)
@@ -107,7 +115,7 @@ class ModelRunner:
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
-        num_kv_heads = hf_config.num_key_value_heads // self.world_size
+        num_kv_heads = hf_config.num_key_value_heads // self.tp_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.dtype.itemsize
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
@@ -151,7 +159,8 @@ class ModelRunner:
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
-            if not seq.block_table:    # warmup
+            if not seq.block_table:    # warmup / EP idle-rank dummy step: nothing is cached
+                slot_mapping.extend([-1] * seqlen_q)
                 continue
             start_block = start // self.block_size
             end_block = (end + self.block_size - 1) // self.block_size
@@ -220,9 +229,9 @@ class ModelRunner:
         # pure decode keeps the CUDA-graph path; anything containing a prefill chunk goes varlen
         is_prefill = not is_pure_decode
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
-        temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+        temperatures = self.prepare_sample(seqs) if self.is_driver else None
         logits = self.run_model(input_ids, positions, is_prefill)
-        token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+        token_ids = self.sampler(logits, temperatures).tolist() if self.is_driver else None
         reset_context()
         return token_ids
 

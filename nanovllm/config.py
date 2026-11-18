@@ -11,6 +11,7 @@ class Config:
     max_model_len: int = 4096
     gpu_memory_utilization: float = 0.9
     tensor_parallel_size: int = 1
+    expert_parallel_size: int = 1     # >1: MoE experts split over ranks, attention data-parallel (see EPEngine)
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
     eos: int = -1
@@ -22,5 +23,9 @@ class Config:
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8
+        assert 1 <= self.expert_parallel_size <= 8
+        assert self.tensor_parallel_size == 1 or self.expert_parallel_size == 1, "TP and EP are exclusive"
+        if self.expert_parallel_size > 1:
+            self.enforce_eager = True    # all_to_all split sizes are data dependent: not CUDA-graph capturable
         self.hf_config = AutoConfig.from_pretrained(self.model)
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)
