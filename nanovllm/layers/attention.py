@@ -1,33 +1,53 @@
 import torch
 from torch import nn
-import triton
-import triton.language as tl
-
-from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+import torch.nn.functional as F
 from nanovllm.utils.context import get_context
 
+try:    # GPU path
+    import triton
+    import triton.language as tl
+    from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+    HAS_FLASH = True
+except ImportError:    # CPU (tests): torch fallback below
+    HAS_FLASH = False
 
-@triton.jit
-def store_kvcache_kernel(
-    key_ptr,
-    key_stride,
-    value_ptr,
-    value_stride,
-    k_cache_ptr,
-    v_cache_ptr,
-    slot_mapping_ptr,
-    D: tl.constexpr,
-):
-    idx = tl.program_id(0)
-    slot = tl.load(slot_mapping_ptr + idx)
-    if slot == -1: return
-    key_offsets = idx * key_stride + tl.arange(0, D)
-    value_offsets = idx * value_stride + tl.arange(0, D)
-    key = tl.load(key_ptr + key_offsets)
-    value = tl.load(value_ptr + value_offsets)
-    cache_offsets = slot * D + tl.arange(0, D)
-    tl.store(k_cache_ptr + cache_offsets, key)
-    tl.store(v_cache_ptr + cache_offsets, value)
+if HAS_FLASH:
+    @triton.jit
+    def store_kvcache_kernel(
+        key_ptr,
+        key_stride,
+        value_ptr,
+        value_stride,
+        k_cache_ptr,
+        v_cache_ptr,
+        slot_mapping_ptr,
+        D: tl.constexpr,
+    ):
+        idx = tl.program_id(0)
+        slot = tl.load(slot_mapping_ptr + idx)
+        if slot == -1: return
+        key_offsets = idx * key_stride + tl.arange(0, D)
+        value_offsets = idx * value_stride + tl.arange(0, D)
+        key = tl.load(key_ptr + key_offsets)
+        value = tl.load(value_ptr + value_offsets)
+        cache_offsets = slot * D + tl.arange(0, D)
+        tl.store(k_cache_ptr + cache_offsets, key)
+        tl.store(v_cache_ptr + cache_offsets, value)
+
+
+def torch_varlen_attention(q, k, v, cu_seqlens_q, scale):
+    """CPU reference for prefill without prefix cache: causal attention per sequence, GQA by
+    repeating kv heads. q: [N, Hq, D], k/v: [N, Hkv, D]."""
+    out = torch.empty_like(q)
+    rep = q.size(1) // k.size(1)
+    bounds = cu_seqlens_q.tolist()
+    for s, e in zip(bounds[:-1], bounds[1:]):
+        qs, ks, vs = (t[s:e].transpose(0, 1) for t in (q, k, v))    # [H, T, D]
+        if rep > 1:
+            ks, vs = ks.repeat_interleave(rep, 0), vs.repeat_interleave(rep, 0)
+        o = F.scaled_dot_product_attention(qs, ks, vs, is_causal=True, scale=scale)
+        out[s:e] = o.transpose(0, 1)
+    return out
 
 
 def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, slot_mapping: torch.Tensor):
@@ -59,6 +79,9 @@ class Attention(nn.Module):
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         context = get_context()
         k_cache, v_cache = self.k_cache, self.v_cache
+        if not HAS_FLASH:
+            assert context.is_prefill and context.block_tables is None, "CPU fallback: prefill without prefix cache only"
+            return torch_varlen_attention(q, k, v, context.cu_seqlens_q, self.scale)
         if k_cache.numel() and v_cache.numel():
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
         if context.is_prefill:

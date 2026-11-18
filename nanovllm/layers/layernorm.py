@@ -1,4 +1,5 @@
 import torch
+from nanovllm.utils.compile import maybe_compile
 from torch import nn
 
 
@@ -13,7 +14,7 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(hidden_size))
 
-    @torch.compile
+    @maybe_compile
     def rms_forward(
         self,
         x: torch.Tensor,
@@ -21,22 +22,22 @@ class RMSNorm(nn.Module):
         orig_dtype = x.dtype
         x = x.float()
         var = x.pow(2).mean(dim=-1, keepdim=True)
-        x.mul_(torch.rsqrt(var + self.eps))
-        x = x.to(orig_dtype).mul_(self.weight)
+        x = x * torch.rsqrt(var + self.eps)    # out of place: with fp32 input x.float() aliases the caller's tensor
+        x = x.to(orig_dtype) * self.weight
         return x
 
-    @torch.compile
+    @maybe_compile
     def add_rms_forward(
         self,
         x: torch.Tensor,
         residual: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         orig_dtype = x.dtype
-        x = x.float().add_(residual.float())
+        x = x.float() + residual.float()
         residual = x.to(orig_dtype)
         var = x.pow(2).mean(dim=-1, keepdim=True)
-        x.mul_(torch.rsqrt(var + self.eps))
-        x = x.to(orig_dtype).mul_(self.weight)
+        x = x * torch.rsqrt(var + self.eps)
+        x = x.to(orig_dtype) * self.weight
         return x, residual
 
     def forward(

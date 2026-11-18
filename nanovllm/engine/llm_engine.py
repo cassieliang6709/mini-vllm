@@ -53,6 +53,8 @@ class LLMEngine:
         seqs, is_pure_decode = self.scheduler.schedule()
         num_prefill_tokens = sum(seq.num_scheduled_tokens for seq in seqs if seq.is_prefill)
         num_decode_tokens = len(seqs) - sum(1 for seq in seqs if seq.is_prefill)
+        # (cached tokens before step, scheduled tokens, is_prefill) per seq, for MFU/MBU accounting
+        self.last_step_info = [(seq.num_cached_tokens, seq.num_scheduled_tokens, seq.is_prefill) for seq in seqs]
         token_ids = self.model_runner.call("run", seqs, is_pure_decode)
         emitted = self.scheduler.postprocess(seqs, token_ids)
         now = perf_counter()

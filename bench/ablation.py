@@ -7,10 +7,12 @@ Each config runs in its own subprocess (fresh CUDA context and KV cache).
 Requests arrive over time (Poisson, --rate req/s), so long prefills land
 while other requests are decoding -- the case mixed batching targets.
 
-Metrics: output throughput (tok/s), TTFT p50/p99, ITL p50/p99, peak GPU memory.
+Metrics: output throughput (tok/s), TTFT p50/p95/p99, ITL p50/p95/p99, MFU (prefill-only steps),
+MBU (pure-decode steps), KV prefix-cache hit rate / evictions, peak GPU memory.
+MFU/MBU formulas and the 4090 peaks are documented in bench/metrics.py.
 Peak memory is dominated by the pre-allocated KV cache (gpu_memory_utilization),
 so it mostly confirms both schedulers use the same budget.
-Results append to bench/results.jsonl.
+Results append to --out (default bench/results.jsonl).
 """
 import argparse
 import json
@@ -19,6 +21,9 @@ import random
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import metrics as M
 
 CONFIGS = [(s, w) for s in ("mixed", "legacy") for w in ("shared", "unique")]
 
@@ -43,7 +48,10 @@ def run_one(args, sched, work):
     from nanovllm import LLM, SamplingParams
 
     llm = LLM(os.path.expanduser(args.model), enforce_eager=args.enforce_eager, max_model_len=args.max_model_len,
-              max_num_batched_tokens=args.max_num_batched_tokens, enable_mixed_batch=(sched == "mixed"))
+              max_num_batched_tokens=args.max_num_batched_tokens, enable_mixed_batch=(sched == "mixed"),
+              tensor_parallel_size=args.tp)
+    hf = llm.model_runner.config.hf_config
+    sm = M.StepMetrics(M.ModelShape.from_hf(hf, hf.dtype.itemsize), torch.cuda.get_device_name(), args.tp)
     rng = random.Random(args.seed)
     reqs = make_workload(work, args.num_requests, rng, args.prefix_len, args.min_in, args.max_in,
                          args.min_out, args.max_out)
@@ -67,13 +75,19 @@ def run_one(args, sched, work):
         if llm.is_finished():
             time.sleep(max(0.0, next_arrival - time.perf_counter()))
             continue
+        t_step = time.perf_counter()
         llm.step()
+        sm.record(llm.last_step_info, time.perf_counter() - t_step)
     elapsed = time.perf_counter() - t0
 
     ttft = [s.token_times[0] - s.arrival_time for s in seqs]
     itl = [b - a for s in seqs for a, b in zip(s.token_times, s.token_times[1:])]
     out_tokens = sum(s.num_completion_tokens for s in seqs)
+    cs = llm.cache_stats()
     res = dict(scheduler=sched, workload=work, requests=len(seqs), rate=args.rate,
+               max_num_batched_tokens=args.max_num_batched_tokens, tp=args.tp,
+               ttft_p95_ms=round(pct(ttft, 95), 1), itl_p95_ms=round(pct(itl, 95), 2),
+               cache_hit_rate=round(cs["hit_rate"], 4), cache_evictions=cs["evictions"], **sm.summary(),
                elapsed_s=round(elapsed, 2), output_tok_per_s=round(out_tokens / elapsed, 1),
                ttft_p50_ms=round(pct(ttft, 50), 1), ttft_p99_ms=round(pct(ttft, 99), 1),
                itl_p50_ms=round(pct(itl, 50), 2), itl_p99_ms=round(pct(itl, 99), 2),
@@ -96,6 +110,8 @@ def main():
     ap.add_argument("--max-model-len", type=int, default=4096)
     ap.add_argument("--max-num-batched-tokens", type=int, default=2048)
     ap.add_argument("--enforce-eager", action="store_true")
+    ap.add_argument("--tp", type=int, default=1, help="tensor_parallel_size")
+    ap.add_argument("--out", default="", help="JSONL path (default bench/results.jsonl)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--_child", default="")
     args = ap.parse_args()
@@ -105,7 +121,7 @@ def main():
         return
 
     configs = [tuple(args.only.split(","))] if args.only else CONFIGS
-    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results.jsonl")
+    out_path = args.out or os.path.join(os.path.dirname(os.path.abspath(__file__)), "results.jsonl")
     rows = []
     for sched, work in configs:
         print(f"== {sched} / {work}", flush=True)
@@ -120,10 +136,11 @@ def main():
         with open(out_path, "a") as f:
             f.write(json.dumps(row) + "\n")
 
-    keys = ["scheduler", "workload", "output_tok_per_s", "ttft_p50_ms", "ttft_p99_ms", "itl_p50_ms", "itl_p99_ms", "peak_mem_gb"]
+    keys = ["scheduler", "workload", "max_num_batched_tokens", "output_tok_per_s", "ttft_p50_ms", "ttft_p95_ms",
+            "itl_p50_ms", "itl_p95_ms", "mfu_prefill", "mbu_decode", "peak_mem_gb"]
     print("\n| " + " | ".join(keys) + " |\n|" + "---|" * len(keys))
     for r in rows:
-        print("| " + " | ".join(str(r[k]) for k in keys) + " |")
+        print("| " + " | ".join(str(r.get(k)) for k in keys) + " |")
 
 
 if __name__ == "__main__":
