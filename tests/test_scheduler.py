@@ -51,7 +51,7 @@ def check_invariants(s):
     for b, n in refs.items():
         assert bm.blocks[b].ref_count == n, f"block {b}: ref {bm.blocks[b].ref_count} != owners {n}"
     assert set(refs) == bm.used_block_ids
-    assert len(bm.free_block_ids) + len(bm.used_block_ids) == len(bm.blocks)
+    assert len(bm.free_block_ids) + len(bm.evictable) + len(bm.used_block_ids) == len(bm.blocks)
     for seq in s.running:
         assert seq.status == SequenceStatus.RUNNING
         assert seq.num_uncomputed_tokens == 1    # running = ready for one decode token

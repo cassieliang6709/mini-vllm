@@ -65,6 +65,10 @@ class LLMEngine:
     def is_finished(self):
         return self.scheduler.is_finished()
 
+    def cache_stats(self) -> dict:
+        """KV prefix-cache stats: hit_tokens, hit_rate, evictions, block usage."""
+        return self.scheduler.block_manager.stats()
+
     def generate(
         self,
         prompts: list[str] | list[list[int]],
