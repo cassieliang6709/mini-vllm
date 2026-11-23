@@ -37,7 +37,11 @@ def main():
     ap.add_argument("--out", default="bench/out/decode_kernel.jsonl")
     args = ap.parse_args()
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    from flash_attn import flash_attn_with_kvcache
+    try:
+        from flash_attn import flash_attn_with_kvcache
+    except ImportError:    # still measure our kernel on its own (bandwidth vs peak)
+        flash_attn_with_kvcache = None
+        print("flash_attn not installed: skipping the flash_attn baseline")
 
     with open(args.out, "a") as f:
         for name, (hq, hkv, d) in SHAPES.items():
@@ -47,8 +51,10 @@ def main():
                     q, kc, vc, bt, lens = make(bs, ctx, hq, hkv, d)
                     ref = paged_decode_reference(q, kc, vc, bt, lens, scale).float()
                     kv_bytes = 2 * bs * ctx * hkv * d * 2
-                    runs = {"flash_attn": lambda: flash_attn_with_kvcache(
-                        q.unsqueeze(1), kc, vc, cache_seqlens=lens, block_table=bt, softmax_scale=scale, causal=True)}
+                    runs = {}
+                    if flash_attn_with_kvcache is not None:
+                        runs["flash_attn"] = lambda: flash_attn_with_kvcache(
+                            q.unsqueeze(1), kc, vc, cache_seqlens=lens, block_table=bt, softmax_scale=scale, causal=True)
                     for p in map(int, args.partitions.split(",")):
                         runs[f"triton_paged_p{p}"] = (lambda p=p: paged_decode_attention(
                             q, kc, vc, bt, lens, scale, partition_size=p))
