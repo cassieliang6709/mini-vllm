@@ -40,6 +40,17 @@ Paged decode kernel (`nanovllm/layers/paged_attention.py`), used for pure-decode
 3. Split-K (PagedAttention V2 / Flash-Decoding): the context is cut into `partition_size`-token pieces that run in parallel; a second kernel merges the partial (max, sum, output) with the usual softmax rescaling.
 4. The grid depends only on batch size and block-table width, so the kernel works inside the captured decode CUDA graphs.
 
+Paged decode kernel on one RTX 4090 (`bench/out/decode_kernel_rtx4090_wbn2.jsonl`, `python bench/decode_kernel_bench.py`; bf16, page 256, Hkv=8, D=128, every sequence the same length). MBU = K+V bytes read / time / 1008 GB/s. No flash_attn baseline in this run.
+
+| bs × ctx | no split | split 512 | best MBU |
+|---|---|---|---|
+| 1 × 8192 | 0.180 ms | 0.058 ms | 0.57 (split 3.1× faster) |
+| 8 × 8192 | 0.347 ms | 0.351 ms | 0.77 |
+| 32 × 8192 | 1.187 ms | 1.215 ms | 0.90 |
+| 128 × 8192 | 4.550 ms | 4.686 ms | 0.94 |
+
+Qwen3-0.6B (Hq=16) and Llama-3.1-8B (Hq=32) shapes take the same time at the same bs × ctx: with GQA grouping the query-head count does not add KV traffic. Splitting helps only when bs × Hkv is too small to fill the GPU.
+
 ## Run
 
 ```bash
@@ -77,7 +88,7 @@ Defined in `bench/metrics.py`.
 | budget sweep, MFU/MBU | yes | formulas and command generation only | not run, no numbers |
 | Llama TP | yes | TP=2 == TP=1 == HF `LlamaForCausalLM` (tiny random config, fp32, gloo) | not run; Llama-3.1-8B not loaded |
 | OLMoE model, MoE layer, EP | yes | EP=2 == single rank == plain-loop reference; EP=2 == EP=1 == HF `OlmoeForCausalLM` (tiny config); dispatch/combine round trip; load-balance stats | not run; OLMoE-1B-7B weights not loaded |
-| Triton paged decode kernel | yes | **not executed** (no GPU/Triton on CPU); a step-by-step torch emulation of both kernels matches the reference (page boundaries, GQA, split sizes, empty CUDA-graph rows) | not run (`scripts/run_2x4090.sh f`) |
+| Triton paged decode kernel | yes | a step-by-step torch emulation of both kernels matches the reference (page boundaries, GQA, split sizes, empty CUDA-graph rows) | RTX 4090: 25 tests pass vs the PyTorch reference incl. CUDA-graph replay (flash_attn comparison not run: flash-attn not installed); kernel bandwidth below. Engine end-to-end (`check_vs_hf --decode-backend triton_paged`) not run |
 | Triton grouped GEMM | yes | **not executed** (no GPU/Triton on CPU); tile bookkeeping tested through a torch emulation of the kernel's indexing | not run |
 | EPEngine (DP attention + EP lockstep) | yes | not tested (needs CUDA + NCCL) | not run |
 
