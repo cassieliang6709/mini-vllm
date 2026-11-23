@@ -9,11 +9,19 @@ Correctness is checked against the PyTorch reference before timing.
 import argparse
 import json
 import os
+import pathlib
+import sys
+import types
 
 import torch
 import triton.testing
 
-from nanovllm.layers.paged_attention import paged_decode_attention, paged_decode_reference
+# Import the kernel without running nanovllm/__init__.py (it pulls in the whole engine: transformers,
+# tqdm, xxhash ...), same trick as tests/conftest.py.
+_pkg = types.ModuleType("nanovllm")
+_pkg.__path__ = [str(pathlib.Path(__file__).resolve().parents[1] / "nanovllm")]
+sys.modules.setdefault("nanovllm", _pkg)
+from nanovllm.layers.paged_attention import paged_decode_attention, paged_decode_reference  # noqa: E402
 
 SHAPES = {"qwen3-0.6b": (16, 8, 128), "llama-3.1-8b": (32, 8, 128)}    # (Hq, Hkv, D)
 PEAK_GBPS = 1008.0
