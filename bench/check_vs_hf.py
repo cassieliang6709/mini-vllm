@@ -23,6 +23,8 @@ def main():
     ap.add_argument("--tp", type=int, default=1)
     ap.add_argument("--new-tokens", type=int, default=32)
     ap.add_argument("--min-agree", type=int, default=8)
+    ap.add_argument("--decode-backend", default="flash_attn", choices=["flash_attn", "triton_paged"])
+    ap.add_argument("--cuda-graph", action="store_true", help="capture decode CUDA graphs (default: eager)")
     args = ap.parse_args()
     path = os.path.expanduser(args.model)
 
@@ -40,7 +42,8 @@ def main():
     torch.cuda.empty_cache()
 
     from nanovllm import LLM, SamplingParams
-    llm = LLM(path, enforce_eager=True, tensor_parallel_size=args.tp, max_model_len=2048)
+    llm = LLM(path, enforce_eager=not args.cuda_graph, tensor_parallel_size=args.tp, max_model_len=2048,
+              decode_attention_backend=args.decode_backend)
     outs = llm.generate([tok.encode(p) for p in PROMPTS],
                         SamplingParams(temperature=1e-4, max_tokens=args.new_tokens, ignore_eos=True), use_tqdm=False)
     bad = 0

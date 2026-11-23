@@ -2,6 +2,17 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from nanovllm.utils.context import get_context
+from nanovllm.layers.paged_attention import paged_decode_attention
+
+DECODE_BACKENDS = ("flash_attn", "triton_paged")
+_DECODE_BACKEND = "flash_attn"
+
+
+def set_decode_backend(name: str):
+    """Pure-decode steps: flash_attn_with_kvcache, or our Triton paged kernel (paged_attention.py)."""
+    global _DECODE_BACKEND
+    assert name in DECODE_BACKENDS, name
+    _DECODE_BACKEND = name
 
 try:    # GPU path
     import triton
@@ -91,8 +102,10 @@ class Attention(nn.Module):
                                        max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
                                        max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
                                        softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+        elif _DECODE_BACKEND == "triton_paged":
+            o = paged_decode_attention(q, k_cache, v_cache, context.block_tables, context.context_lens, self.scale)
         else:    # decode
             o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
-                                        cache_seqlens=context.context_lens, block_table=context.block_tables, 
+                                        cache_seqlens=context.context_lens, block_table=context.block_tables,
                                         softmax_scale=self.scale, causal=True)
         return o

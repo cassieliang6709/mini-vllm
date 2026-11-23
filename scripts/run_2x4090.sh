@@ -2,7 +2,7 @@
 # Commands to run on the 2x RTX 4090 box. NOTHING here has been run yet; no numbers exist.
 #
 #   bash scripts/run_2x4090.sh all        # everything, in order
-#   bash scripts/run_2x4090.sh a          # one stage: a b c d e
+#   bash scripts/run_2x4090.sh a          # one stage: a b c d e f
 #
 # Model dirs (download first, e.g. huggingface-cli download <repo> --local-dir <dir>):
 #   Qwen/Qwen3-0.6B, meta-llama/Llama-3.1-8B (gated), allenai/OLMoE-1B-7B-0924
@@ -54,8 +54,15 @@ stage_e() {  # (e) official vLLM on the same configs. Check flags with `vllm ben
   # Latency (TTFT/ITL) under load: use `vllm serve ...` + `vllm bench serve --request-rate 8` to compare with ablation.py's Poisson arrivals.
 }
 
+stage_f() {  # (f) paged decode kernel: unit tests on GPU, microbench vs flash_attn, greedy agreement with HF (eager + CUDA graph)
+  python -m pytest -q tests/test_paged_attention.py
+  python bench/decode_kernel_bench.py --out bench/out/decode_kernel.jsonl
+  python bench/check_vs_hf.py --model "$QWEN" --decode-backend triton_paged
+  python bench/check_vs_hf.py --model "$QWEN" --decode-backend triton_paged --cuda-graph
+}
+
 case "${1:-all}" in
-  a) stage_a ;; b) stage_b ;; c) stage_c ;; d) stage_d ;; e) stage_e ;;
-  all) stage_a; stage_b; stage_c; stage_d; stage_e ;;
-  *) echo "usage: $0 [a|b|c|d|e|all]"; exit 2 ;;
+  a) stage_a ;; b) stage_b ;; c) stage_c ;; d) stage_d ;; e) stage_e ;; f) stage_f ;;
+  all) stage_a; stage_b; stage_c; stage_d; stage_e; stage_f ;;
+  *) echo "usage: $0 [a|b|c|d|e|f|all]"; exit 2 ;;
 esac

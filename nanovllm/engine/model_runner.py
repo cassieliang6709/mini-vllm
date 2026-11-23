@@ -8,6 +8,7 @@ from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models import get_model_class
 from nanovllm.layers.sampler import Sampler
+from nanovllm.layers.attention import set_decode_backend
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
 from nanovllm.utils.parallel import set_parallel_mode
@@ -36,6 +37,7 @@ class ModelRunner:
         torch.set_default_dtype(hf_config.dtype)
         torch.set_default_device("cuda")
         set_parallel_mode("ep" if self.ep_mode else "tp")
+        set_decode_backend(config.decode_attention_backend)
         self.model = get_model_class(hf_config)(hf_config)
         load_model(self.model, config.model)
         self.sampler = Sampler()

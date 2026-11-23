@@ -15,6 +15,7 @@ Fork of [nano-vllm](https://github.com/GeeeekExplorer/nano-vllm) @ `bb823b3` wit
 | MoE | none | router, top-k, grouped expert GEMM (Triton kernel on GPU, torch fallback on CPU), EP all_to_all dispatch/combine |
 | metrics | throughput | + TTFT/ITL p50/p95, MFU (prefill), MBU (decode) in `bench/metrics.py` |
 | serving | offline `generate()` | `server.py`: `/v1/chat/completions`, `/v1/completions`, SSE streaming |
+| decode attention | `flash_attn_with_kvcache` | + own Triton paged decode kernel (`decode_attention_backend="triton_paged"`): PagedAttention with GQA grouping and split-K, see below |
 
 Scheduling (`nanovllm/engine/scheduler.py`, `enable_mixed_batch=True`):
 1. Every running request gets 1 decode token (preempt from the tail if out of KV blocks).
@@ -32,6 +33,12 @@ Expert parallelism (`nanovllm/layers/moe.py`, `nanovllm/models/olmoe.py`, `nanov
 4. Owning rank sorts rows by expert and runs two grouped GEMMs (gate+up, down).
 5. Combine: rows return to the sending rank in send order, are un-permuted, multiplied by the routing weights and summed over k.
 6. A rank with no work runs a 1-token dummy forward so the collectives stay matched. EP forces `enforce_eager` (split sizes are data dependent, so no CUDA graph).
+
+Paged decode kernel (`nanovllm/layers/paged_attention.py`), used for pure-decode steps when `decode_attention_backend="triton_paged"`:
+1. Reproduces the decode kernel of PagedAttention (vLLM, SOSP'23): each sequence's K/V is read page by page through its block table.
+2. GQA grouping: one program per (sequence, KV head) handles all query heads of that group, so a KV page is loaded once per group, not once per query head.
+3. Split-K (PagedAttention V2 / Flash-Decoding): the context is cut into `partition_size`-token pieces that run in parallel; a second kernel merges the partial (max, sum, output) with the usual softmax rescaling.
+4. The grid depends only on batch size and block-table width, so the kernel works inside the captured decode CUDA graphs.
 
 ## Run
 
@@ -70,6 +77,7 @@ Defined in `bench/metrics.py`.
 | budget sweep, MFU/MBU | yes | formulas and command generation only | not run, no numbers |
 | Llama TP | yes | TP=2 == TP=1 == HF `LlamaForCausalLM` (tiny random config, fp32, gloo) | not run; Llama-3.1-8B not loaded |
 | OLMoE model, MoE layer, EP | yes | EP=2 == single rank == plain-loop reference; EP=2 == EP=1 == HF `OlmoeForCausalLM` (tiny config); dispatch/combine round trip; load-balance stats | not run; OLMoE-1B-7B weights not loaded |
+| Triton paged decode kernel | yes | **not executed** (no GPU/Triton on CPU); a step-by-step torch emulation of both kernels matches the reference (page boundaries, GQA, split sizes, empty CUDA-graph rows) | not run (`scripts/run_2x4090.sh f`) |
 | Triton grouped GEMM | yes | **not executed** (no GPU/Triton on CPU); tile bookkeeping tested through a torch emulation of the kernel's indexing | not run |
 | EPEngine (DP attention + EP lockstep) | yes | not tested (needs CUDA + NCCL) | not run |
 

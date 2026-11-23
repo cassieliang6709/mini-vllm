@@ -18,6 +18,7 @@ class Config:
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
     enable_mixed_batch: bool = True    # False = upstream policy (prefill-only or decode-only steps)
+    decode_attention_backend: str = "flash_attn"    # or "triton_paged" (nanovllm/layers/paged_attention.py)
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
