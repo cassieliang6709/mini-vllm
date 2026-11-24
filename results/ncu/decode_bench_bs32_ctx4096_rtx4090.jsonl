@@ -1,0 +1,4 @@
+{"shape": "qwen3-0.6b", "bs": 32, "ctx": 4096, "backend": "triton_paged_p0", "ms": 0.6273, "gbps": 855.9, "mbu": 0.849, "max_abs_err": 0.00048828125}
+{"shape": "qwen3-0.6b", "bs": 32, "ctx": 4096, "backend": "triton_paged_p512", "ms": 0.6382, "gbps": 841.2, "mbu": 0.835, "max_abs_err": 0.00048828125}
+{"shape": "llama-3.1-8b", "bs": 32, "ctx": 4096, "backend": "triton_paged_p0", "ms": 0.6269, "gbps": 856.4, "mbu": 0.85, "max_abs_err": 0.0009765625}
+{"shape": "llama-3.1-8b", "bs": 32, "ctx": 4096, "backend": "triton_paged_p512", "ms": 0.6449, "gbps": 832.5, "mbu": 0.826, "max_abs_err": 0.00048828125}
